@@ -1,0 +1,31 @@
+DTinh Overlay Builder 2.8
+
+- Xóa hoàn toàn chức năng đóng gói module KernelSU.
+- Thêm tùy chọn tạo đồng thời values, values-vi và values-zh-rCN.
+- Chuyển thư mục build tạm sang thư mục TEMP của hệ thống.
+- BUILD_EXE không còn để lại build, dist hoặc file spec trong thư mục tool.
+- Rút gọn tools xuống đúng các thành phần AAPT2, zipalign, apksigner và android.jar.
+- Dọn build cũ, cache, test cũ và output đóng gói thừa.
+
+DTinh Overlay Builder 2.1
+
+- Bỏ validator cũ vốn chặn nhầm key có dấu chấm.
+- Chấp nhận key như notification_low_storage_size_1.5_GB.
+- Hỗ trợ string, plurals, string-array, array và integer-array.
+- Resource map tự chuyển đúng type string/plurals/array.
+- Kiểm tra trùng theo cặp type/name, tránh báo trùng sai giữa các type.
+- Log số lượng resource theo từng type.
+
+DTinh Overlay Builder 2.0
+
+- Thiết kế lại giao diện theo bố cục hai cột, giảm chiều cao và dễ thao tác hơn.
+- Thêm danh sách chọn nhiều APK hệ thống/framework.
+- Thêm xóa, xóa hết và đổi thứ tự APK dependency.
+- Link AAPT2 theo thứ tự android.jar -> APK hệ thống -> APK đích.
+- Chuyển resource dịch từ res/values sang đúng res/values-vi.
+- Tự tạo overlay package riêng khi người dùng để trống.
+- Kiểm tra XML, key trùng, tên key và cấu trúc APK trước khi build.
+- Không ghi mật khẩu keystore/key vào log.
+- Ngăn nhấn Build nhiều lần và dọn thư mục tạm sau khi hoàn tất.
+- Hỗ trợ mở thư mục output trên Windows, Linux và macOS.
+- Cải thiện thông báo lỗi và log dependency.
