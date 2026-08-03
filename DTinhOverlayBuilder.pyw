@@ -227,6 +227,23 @@ def prepare_translation_xml(source, destination, target_package=None, local_reso
     return tuple(sorted(fixes)), tuple(sorted(reference_rewrites))
 
 
+def choose_overlay_package_id(target_resource_ids):
+    """Chọn package ID hợp lệ (0x7f-0xff) khác với package ID của target."""
+    if not target_resource_ids:
+        return 0x7f
+    first_id = next(iter(target_resource_ids.values()))
+    target_pkg_id = (first_id >> 24) & 0xFF
+    # Nếu target nằm trong khoảng cho phép, chọn một ID khác
+    if 0x7f <= target_pkg_id <= 0xff:
+        for candidate in range(0x7f, 0x100):
+            if candidate != target_pkg_id:
+                return candidate
+        # Nếu tất cả đều trùng (không thể xảy ra), fallback
+        return 0x7f
+    # Nếu target có ID < 0x7f (vd 0x11), dùng 0x7f mặc định
+    return 0x7f
+
+
 def make_link_command(
     aapt2,
     output_apk,
@@ -236,6 +253,7 @@ def make_link_command(
     target_apk,
     compiled,
     stable_ids=None,
+    package_id=None,
 ):
     command = [
         str(aapt2),
@@ -264,6 +282,8 @@ def make_link_command(
     # tồn tại trong APK đích, giữ nguyên type-id/entry-id khớp 100%.
     if stable_ids:
         command.extend(["--stable-ids", str(stable_ids)])
+    if package_id is not None:
+        command.extend(["--package-id", f"0x{package_id:02x}"])
     command.append(str(compiled))
     return command
 
@@ -282,7 +302,7 @@ def parse_target_resource_ids(dump_output):
     return mapping
 
 
-def write_stable_ids_file(path, target_resource_ids, entries, target_package):
+def write_stable_ids_file(path, target_resource_ids, entries, overlay_package, overlay_package_id):
     """Ghi file stable-ids cho aapt2, chỉ chứa resource nào đã có sẵn ID
     trong APK đích (để override đúng slot). Trả về (matched, missing) để
     hiển thị chẩn đoán cho người dùng.
@@ -303,8 +323,10 @@ def write_stable_ids_file(path, target_resource_ids, entries, target_package):
         if resource_id is None:
             missing.append(f"{entry.resource_type}/{entry.name}")
             continue
+        # Giữ nguyên 3 byte cuối (type + entry), thay byte đầu (package ID)
+        new_id = (overlay_package_id << 24) | (resource_id & 0x00FFFFFF)
         lines.append(
-            f"{target_package}:{entry.resource_type}/{entry.name} = 0x{resource_id:08x}"
+            f"{overlay_package}:{entry.resource_type}/{entry.name} = 0x{new_id:08x}"
         )
         matched.append(key)
     Path(path).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -623,9 +645,7 @@ class App:
         tk.Checkbutton(
             options,
             text=(
-                "Luôn thêm values/ (mặc định) và values-zh-rCN (tiếng Trung giản thể), "
-                "kể cả khi APK đích đã có sẵn tiếng Anh (mặc định: tool tự kiểm tra và "
-                "chỉ thêm khi APK đích CHƯA có tiếng Anh)"
+                "Luôn thêm tiếng Trung và tiếng Anh"
             ),
             variable=self.force_base_and_chinese_values,
             bg=CARD,
@@ -637,7 +657,7 @@ class App:
             wraplength=520,
             justify="left",
         ).pack(side="left")
-        self.output_hint = self.label(options, "Tên APK: dtinh-<package đích>.apk (tự động)", 9, True, BLUE)
+        self.output_hint = self.label(options, "Tên APK: auto", 9, True, BLUE)
         self.output_hint.pack(side="right")
 
         action = tk.Frame(right_column, bg=BG)
@@ -1017,9 +1037,16 @@ class App:
                 step="Đọc resource ID gốc của APK đích",
             )
             target_resource_ids = parse_target_resource_ids(dump_output)
+            overlay_package_id = choose_overlay_package_id(target_resource_ids)
+            self.logln(f"• Gán package ID cho overlay: 0x{overlay_package_id:02x}")
+
             stable_ids_path = temporary_path / "stable_ids.txt"
             matched_ids, missing_ids = write_stable_ids_file(
-                stable_ids_path, target_resource_ids, resource_entries, target_package
+                stable_ids_path,
+                target_resource_ids,
+                resource_entries,
+                overlay_package,
+                overlay_package_id,
             )
             self.logln(
                 f"• Khớp ID gốc với APK đích: {len(matched_ids)}/{len(resource_entries)} resource"
@@ -1132,6 +1159,7 @@ class App:
                 target_apk,
                 compiled,
                 stable_ids=stable_ids_path,
+                package_id=overlay_package_id,
             )
             self.run(link_command, step="Liên kết overlay")
 
