@@ -76,7 +76,7 @@ class BuildConfig:
     output_name: str
     overlay_package: str
     priority: int
-    add_base_and_chinese_values: bool
+    force_base_and_chinese_values: bool
 
 
 @dataclass(frozen=True)
@@ -227,7 +227,16 @@ def prepare_translation_xml(source, destination, target_package=None, local_reso
     return tuple(sorted(fixes)), tuple(sorted(reference_rewrites))
 
 
-def make_link_command(aapt2, output_apk, manifest, android_jar, system_apks, target_apk, compiled):
+def make_link_command(
+    aapt2,
+    output_apk,
+    manifest,
+    android_jar,
+    system_apks,
+    target_apk,
+    compiled,
+    stable_ids=None,
+):
     command = [
         str(aapt2),
         "link",
@@ -245,9 +254,85 @@ def make_link_command(aapt2, output_apk, manifest, android_jar, system_apks, tar
         str(target_apk),
         "--auto-add-overlay",
         "--no-resource-removal",
-        str(compiled),
     ])
+    # QUAN TRỌNG: nếu không ép ID, aapt2 sẽ tự đánh số type-id theo thứ tự
+    # xuất hiện TRONG overlay (vd chỉ có string/array/plurals -> 1,2,3),
+    # khác hoàn toàn với bảng resource của APK đích (vd attr=1,array=2,
+    # plurals=3,string=4). Lệch type-id -> app đọc nhầm loại resource tại
+    # cùng 1 ID số -> crash (Resources$NotFoundException / sai kiểu dữ liệu).
+    # --stable-ids buộc aapt2 tái sử dụng đúng ID gốc cho mọi resource đã
+    # tồn tại trong APK đích, giữ nguyên type-id/entry-id khớp 100%.
+    if stable_ids:
+        command.extend(["--stable-ids", str(stable_ids)])
+    command.append(str(compiled))
     return command
+
+
+RESOURCE_DUMP_ENTRY_RE = re.compile(
+    r"resource\s+0x([0-9a-fA-F]{8})\s+(?:[\w.]+:)?(\w+)/([A-Za-z0-9_.\-$]+)"
+)
+
+
+def parse_target_resource_ids(dump_output):
+    """Trích xuất bảng {(type, name): id} từ output của `aapt2 dump resources`."""
+    mapping = {}
+    for match in RESOURCE_DUMP_ENTRY_RE.finditer(dump_output):
+        hex_id, resource_type, name = match.groups()
+        mapping[(resource_type, name)] = int(hex_id, 16)
+    return mapping
+
+
+def write_stable_ids_file(path, target_resource_ids, entries, target_package):
+    """Ghi file stable-ids cho aapt2, chỉ chứa resource nào đã có sẵn ID
+    trong APK đích (để override đúng slot). Trả về (matched, missing) để
+    hiển thị chẩn đoán cho người dùng.
+
+    QUAN TRỌNG: định dạng dòng bắt buộc phải có tiền tố package, tức
+    "package:type/name = 0xID" (vd "com.android.settings:string/foo =
+    0x7f040288"), KHÔNG được chỉ ghi "type/name = 0xID". Thiếu tiền tố
+    package, aapt2 sẽ không match được entry nào trong file này -> toàn
+    bộ resource vẫn bị đánh số lại từ đầu như không hề có --stable-ids,
+    và log "khớp X/Y" trước đó chỉ là so khớp nội bộ ở phía Python, không
+    phản ánh việc aapt2 có thực sự áp dụng được hay không."""
+    matched = []
+    missing = []
+    lines = []
+    for entry in entries:
+        key = (entry.resource_type, entry.name)
+        resource_id = target_resource_ids.get(key)
+        if resource_id is None:
+            missing.append(f"{entry.resource_type}/{entry.name}")
+            continue
+        lines.append(
+            f"{target_package}:{entry.resource_type}/{entry.name} = 0x{resource_id:08x}"
+        )
+        matched.append(key)
+    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return matched, missing
+
+
+ENGLISH_LOCALE_CONFIG_RE = re.compile(
+    r"^(?:en(?:-r[A-Z]{2})?|b\+en(?:\+[A-Za-z0-9]+)*)(?:-|$)"
+)
+
+
+def has_english_locale(dump_configurations_output):
+    """Trả về True nếu APK đích có sẵn ít nhất 1 tập resource dành riêng
+    cho locale tiếng Anh (vd values-en/, values-en-rUS/), dựa trên output
+    của lệnh `aapt2 dump configurations <apk>`. Mỗi dòng output là 1 tổ
+    hợp qualifier (locale, mật độ điểm ảnh, hướng màn hình...) đã xuất
+    hiện trong bảng resource, ví dụ "en", "en-rUS", "vi", "zh-rCN",
+    "port-mdpi-v4"... Nếu APK gốc có sẵn một locale "en", nghĩa là khi máy
+    để ngôn ngữ không phải tiếng Việt, hệ thống vẫn có chuỗi tiếng Anh gốc
+    để fallback thay vì bị trống/lỗi -> không cần tool tự chèn thêm
+    values/ (mặc định) hay values-zh-rCN/ để dự phòng nữa."""
+    for raw_line in dump_configurations_output.splitlines():
+        token = raw_line.strip()
+        if not token or token == "(default)":
+            continue
+        if ENGLISH_LOCALE_CONFIG_RE.match(token):
+            return True
+    return False
 
 
 def write_manifest(path, overlay_package, target_package, priority):
@@ -278,7 +363,7 @@ def stage_overlay_project(
     overlay_package,
     target_package,
     priority,
-    add_base_and_chinese_values=False,
+    add_base_and_chinese_values=True,
 ):
     resource_directories = ["values-vi"]
     if add_base_and_chinese_values:
@@ -328,7 +413,7 @@ class App:
         self.output_name = tk.StringVar()
         self.overlay_package = tk.StringVar()
         self.priority = tk.StringVar(value="999")
-        self.add_base_and_chinese_values = tk.BooleanVar(value=False)
+        self.force_base_and_chinese_values = tk.BooleanVar(value=False)
         self.system_apks = []
         self.is_building = False
 
@@ -539,8 +624,8 @@ class App:
         options.pack(fill="x", pady=(2, 0))
         tk.Checkbutton(
             options,
-            text="Xuất thêm values và values-zh-rCN",
-            variable=self.add_base_and_chinese_values,
+            text="Luôn xuất thêm values và values-zh-rCN (ép buộc, mặc định tool tự kiểm tra APK đích có tiếng Anh không)",
+            variable=self.force_base_and_chinese_values,
             bg=CARD,
             fg=TEXT,
             activebackground=CARD,
@@ -839,7 +924,7 @@ class App:
             output_name=sanitize_output_name(self.output_name.get()),
             overlay_package=self.overlay_package.get().strip(),
             priority=priority,
-            add_base_and_chinese_values=bool(self.add_base_and_chinese_values.get()),
+            force_base_and_chinese_values=bool(self.force_base_and_chinese_values.get()),
         )
 
     def validate_config(self, config):
@@ -929,6 +1014,61 @@ class App:
                 raise RuntimeError("Overlay package không được trùng package APK đích")
 
             temporary_path = Path(tempfile.mkdtemp(prefix="dtinh_overlay_", dir=WORK))
+
+            self.set_status("Đọc bảng resource ID gốc…", BLUE, 10)
+            dump_output = self.run(
+                [aapt2, "dump", "resources", target_apk],
+                step="Đọc resource ID gốc của APK đích",
+            )
+            target_resource_ids = parse_target_resource_ids(dump_output)
+            stable_ids_path = temporary_path / "stable_ids.txt"
+            matched_ids, missing_ids = write_stable_ids_file(
+                stable_ids_path, target_resource_ids, resource_entries, target_package
+            )
+            self.logln(
+                f"• Khớp ID gốc với APK đích: {len(matched_ids)}/{len(resource_entries)} resource"
+            )
+            if missing_ids:
+                sample = ", ".join(missing_ids[:8])
+                more = f" (+{len(missing_ids) - 8} nữa)" if len(missing_ids) > 8 else ""
+                self.logln(
+                    f"⚠ {len(missing_ids)} resource không tìm thấy tên tương ứng trong APK đích "
+                    f"(resource mới, hoặc APK đích khác phiên bản/build so với máy thật): "
+                    f"{sample}{more}"
+                )
+
+            self.set_status("Kiểm tra locale của APK đích…", BLUE, 18)
+            english_detected = None
+            try:
+                configurations_output = self.run(
+                    [aapt2, "dump", "configurations", target_apk],
+                    step="Kiểm tra locale sẵn có trong APK đích",
+                )
+                english_detected = has_english_locale(configurations_output)
+            except Exception as exc:
+                self.logln(
+                    f"⚠ Không kiểm tra được locale của APK đích ({exc}); "
+                    "coi như KHÔNG có tiếng Anh để an toàn"
+                )
+
+            if config.force_base_and_chinese_values:
+                add_base_and_chinese_values = True
+                self.logln(
+                    "• Đã bật ép buộc thủ công → vẫn thêm values/ + values-zh-rCN"
+                )
+            elif english_detected:
+                add_base_and_chinese_values = False
+                self.logln(
+                    "• APK đích đã có sẵn locale tiếng Anh → không cần thêm "
+                    "values/ + values-zh-rCN"
+                )
+            else:
+                add_base_and_chinese_values = True
+                self.logln(
+                    "• APK đích không có sẵn locale tiếng Anh (hoặc không xác "
+                    "định được) → tự động thêm values/ + values-zh-rCN để dự phòng"
+                )
+
             staged_resources, resource_directories, format_fixes, reference_fixes = stage_overlay_project(
                 temporary_path,
                 translation_xmls,
@@ -936,7 +1076,7 @@ class App:
                 overlay_package,
                 target_package,
                 config.priority,
-                config.add_base_and_chinese_values,
+                add_base_and_chinese_values,
             )
 
             compiled = temporary_path / "compiled.zip"
@@ -994,6 +1134,7 @@ class App:
                 dependencies,
                 target_apk,
                 compiled,
+                stable_ids=stable_ids_path,
             )
             self.run(link_command, step="Liên kết overlay")
 
