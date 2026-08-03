@@ -73,7 +73,6 @@ class BuildConfig:
     alias: str
     keystore_password: str
     key_password: str
-    output_name: str
     overlay_package: str
     priority: int
     force_base_and_chinese_values: bool
@@ -93,11 +92,12 @@ def sanitize_output_name(value):
     return value or "overlay"
 
 
-def automatic_overlay_package(target_package, output_name):
-    suffix = f"{target_package}.{sanitize_output_name(output_name)}".lower()
-    suffix = re.sub(r"[^a-z0-9_.]", "_", suffix)
-    suffix = ".".join(part if part and not part[0].isdigit() else f"p_{part}" for part in suffix.split("."))
-    return f"com.dtinh.overlay.{suffix}"
+def automatic_overlay_package(target_package):
+    """Sinh overlay package theo dạng dtinh.<package đích>, vd:
+    target_package = "com.miui.cleanmaster" -> "dtinh.com.miui.cleanmaster".
+    target_package luôn là package Android hợp lệ (đọc trực tiếp từ APK
+    đích qua aapt2) nên không cần sanitize thêm."""
+    return f"dtinh.{target_package}"
 
 
 def parse_resource_entries(path):
@@ -410,7 +410,6 @@ class App:
         self.alias = tk.StringVar()
         self.keystore_password = tk.StringVar()
         self.key_password = tk.StringVar()
-        self.output_name = tk.StringVar()
         self.overlay_package = tk.StringVar()
         self.priority = tk.StringVar(value="999")
         self.force_base_and_chinese_values = tk.BooleanVar(value=False)
@@ -612,10 +611,9 @@ class App:
             config,
             [
                 ("Alias", self.alias, None),
-                ("Tên APK", self.output_name, None),
                 ("Mật khẩu keystore", self.keystore_password, "*"),
                 ("Mật khẩu key (có thể để trống)", self.key_password, "*"),
-                ("Overlay package (tự động nếu trống)", self.overlay_package, None),
+                ("Overlay package (để trống = dtinh.<package đích>)", self.overlay_package, None),
                 ("Priority", self.priority, None),
             ],
         )
@@ -624,7 +622,11 @@ class App:
         options.pack(fill="x", pady=(2, 0))
         tk.Checkbutton(
             options,
-            text="Luôn xuất thêm values và values-zh-rCN (ép buộc, mặc định tool tự kiểm tra APK đích có tiếng Anh không)",
+            text=(
+                "Luôn thêm values/ (mặc định) và values-zh-rCN (tiếng Trung giản thể), "
+                "kể cả khi APK đích đã có sẵn tiếng Anh (mặc định: tool tự kiểm tra và "
+                "chỉ thêm khi APK đích CHƯA có tiếng Anh)"
+            ),
             variable=self.force_base_and_chinese_values,
             bg=CARD,
             fg=TEXT,
@@ -632,10 +634,11 @@ class App:
             activeforeground=TEXT,
             selectcolor="#202631",
             font=("Segoe UI", 9),
+            wraplength=520,
+            justify="left",
         ).pack(side="left")
-        self.output_hint = self.label(options, "dtinh-overlay.apk", 9, True, BLUE)
+        self.output_hint = self.label(options, "Tên APK: dtinh-<package đích>.apk (tự động)", 9, True, BLUE)
         self.output_hint.pack(side="right")
-        self.output_name.trace_add("write", self.update_output_hint)
 
         action = tk.Frame(right_column, bg=BG)
         action.pack(fill="x", pady=(0, 7))
@@ -690,7 +693,6 @@ class App:
         if target_changed:
             self.translation_xmls.clear()
             self.refresh_translation_list()
-            self.output_name.set("")
             self.overlay_package.set("")
         self.remove_duplicate_target_dependency()
 
@@ -779,10 +781,6 @@ class App:
         if not path:
             return ""
         return os.path.normcase(os.path.abspath(path))
-
-    def update_output_hint(self, *_):
-        name = sanitize_output_name(self.output_name.get())
-        self.output_hint.config(text=f"dtinh-{name}.apk")
 
     def open_output(self):
         OUT.mkdir(exist_ok=True)
@@ -921,7 +919,6 @@ class App:
             alias=self.alias.get().strip(),
             keystore_password=self.keystore_password.get(),
             key_password=self.key_password.get(),
-            output_name=sanitize_output_name(self.output_name.get()),
             overlay_package=self.overlay_package.get().strip(),
             priority=priority,
             force_base_and_chinese_values=bool(self.force_base_and_chinese_values.get()),
@@ -1007,9 +1004,8 @@ class App:
 
             target_package = self.detect_package(target_apk, aapt2)
             resource_entries = parse_resource_files(translation_xmls)
-            overlay_package = config.overlay_package or automatic_overlay_package(
-                target_package, config.output_name
-            )
+            overlay_package = config.overlay_package or automatic_overlay_package(target_package)
+            output_name = sanitize_output_name(target_package)
             if overlay_package == target_package:
                 raise RuntimeError("Overlay package không được trùng package APK đích")
 
@@ -1082,7 +1078,7 @@ class App:
             compiled = temporary_path / "compiled.zip"
             unsigned = temporary_path / "unsigned.apk"
             aligned = temporary_path / "aligned.apk"
-            final_apk = OUT / f"dtinh-{config.output_name}.apk"
+            final_apk = OUT / f"dtinh-{output_name}.apk"
 
             counts = Counter(entry.resource_type for entry in resource_entries)
             type_summary = ", ".join(
@@ -1091,6 +1087,7 @@ class App:
             )
             self.logln(f"• APK đích: {target_package}")
             self.logln(f"• Package overlay: {overlay_package}")
+            self.logln(f"• Tên file APK (tự động theo package đích): dtinh-{output_name}.apk")
             self.logln(
                 f"• Resource: {len(resource_entries)} ({type_summary})"
             )
